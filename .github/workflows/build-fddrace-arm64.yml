@@ -110,7 +110,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euxo pipefail
-          TAG="fddrace-arm64-build-${GITHUB_RUN_NUMBER}"
+          export TAG="fddrace-arm64-build-${GITHUB_RUN_NUMBER}"
           ARCHIVE_PATH=$(find "${GITHUB_WORKSPACE}/artifacts" -maxdepth 1 -name 'fddrace-*-linux-arm64.tar.xz' | head -n 1)
           CHECKSUM_PATH="${ARCHIVE_PATH}.sha256"
           test -n "${ARCHIVE_PATH}"
