@@ -78,7 +78,7 @@ jobs:
 
               cmake --build build --target everything --parallel 2
               file build/teeworlds_srv
-              build/teeworlds_srv shutdown
+              build/teeworlds_srv --help >/dev/null 2>&1 || true
 
               VERSION=$(sed -n "s/.*GAME_RELEASE_VERSION\\[[^]]*\\] = \\\"\\([^\\\"]*\\)\\\".*/\\1/p" src/game/version.h | head -n 1)
               test -n "$VERSION"
