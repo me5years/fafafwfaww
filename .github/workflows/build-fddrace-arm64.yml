@@ -1,0 +1,139 @@
+name: Build F-DDrace ARM64
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/build-fddrace-arm64.yml
+      - README.md
+
+concurrency:
+  group: build-fddrace-arm64-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      UPSTREAM_REPO: fokkonaut/F-DDrace
+      UPSTREAM_REF: F-DDrace
+
+    steps:
+      - name: Prepare directories
+        run: |
+          set -euxo pipefail
+          mkdir -p "${GITHUB_WORKSPACE}/upstream"
+          mkdir -p "${GITHUB_WORKSPACE}/artifacts"
+
+      - name: Clone upstream source
+        run: |
+          set -euxo pipefail
+          git clone --depth 1 --branch "${UPSTREAM_REF}" "https://github.com/${UPSTREAM_REPO}.git" "${GITHUB_WORKSPACE}/upstream/F-DDrace"
+          git -C "${GITHUB_WORKSPACE}/upstream/F-DDrace" submodule sync --recursive
+          git -C "${GITHUB_WORKSPACE}/upstream/F-DDrace" submodule update --init --recursive --depth 1
+
+      - name: Enable arm64 emulation
+        run: |
+          set -euxo pipefail
+          docker run --rm --privileged tonistiigi/binfmt --install arm64
+
+      - name: Build server in Debian trixie arm64 container
+        run: |
+          set -euxo pipefail
+          docker run --rm --platform linux/arm64 \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work/upstream/F-DDrace \
+            debian:trixie \
+            bash -lc '
+              set -euxo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                bash \
+                build-essential \
+                ca-certificates \
+                cmake \
+                file \
+                git \
+                libcurl4-openssl-dev \
+                libfreetype6-dev \
+                libssl-dev \
+                ninja-build \
+                pkg-config \
+                python3 \
+                xz-utils \
+                zlib1g-dev
+
+              cmake -S . -B build -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCLIENT=OFF \
+                -DDEV=OFF \
+                -DDOWNLOAD_GTEST=OFF \
+                -DCMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE=$PWD/build
+
+              cmake --build build --target everything --parallel 2
+              file build/teeworlds_srv
+              build/teeworlds_srv shutdown
+
+              VERSION=$(sed -n "s/.*GAME_RELEASE_VERSION\\[[^]]*\\] = \\\"\\([^\\\"]*\\)\\\".*/\\1/p" src/game/version.h | head -n 1)
+              test -n "$VERSION"
+
+              ARCHIVE_ROOT="/work/artifacts/fddrace-${VERSION}-linux-arm64"
+              rm -rf "$ARCHIVE_ROOT"
+              mkdir -p "$ARCHIVE_ROOT"
+
+              install -m 755 build/teeworlds_srv "$ARCHIVE_ROOT/teeworlds_srv"
+              cp -r build/data "$ARCHIVE_ROOT/data"
+              cp storage.cfg license.txt "$ARCHIVE_ROOT/"
+
+              {
+                echo "Upstream repo: '"${UPSTREAM_REPO}"'"
+                echo "Upstream ref: '"${UPSTREAM_REF}"'"
+                echo "Build environment: Debian trixie (linux/arm64)"
+                echo
+                file build/teeworlds_srv
+                echo
+                ldd build/teeworlds_srv
+              } > "$ARCHIVE_ROOT/BUILD-INFO.txt"
+
+              tar -C /work/artifacts -cJf "/work/artifacts/fddrace-${VERSION}-linux-arm64.tar.xz" "fddrace-${VERSION}-linux-arm64"
+              sha256sum "/work/artifacts/fddrace-${VERSION}-linux-arm64.tar.xz" > "/work/artifacts/fddrace-${VERSION}-linux-arm64.tar.xz.sha256"
+            '
+
+      - name: Publish release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          TAG="fddrace-arm64-build-${GITHUB_RUN_NUMBER}"
+          ARCHIVE_PATH=$(find "${GITHUB_WORKSPACE}/artifacts" -maxdepth 1 -name 'fddrace-*-linux-arm64.tar.xz' | head -n 1)
+          CHECKSUM_PATH="${ARCHIVE_PATH}.sha256"
+          test -n "${ARCHIVE_PATH}"
+          test -f "${CHECKSUM_PATH}"
+
+          RELEASE_JSON=$(python3 -c "import json, os; print(json.dumps({'tag_name': os.environ['TAG'], 'name': f\"F-DDrace arm64 build #{os.environ['GITHUB_RUN_NUMBER']}\", 'body': f\"Automated build of {os.environ['UPSTREAM_REPO']}@{os.environ['UPSTREAM_REF']} for Debian trixie linux/arm64.\", 'draft': False, 'prerelease': True, 'target_commitish': os.environ['GITHUB_SHA']}))")
+
+          RESPONSE=$(curl --fail --silent --show-error \
+            -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            -d "${RELEASE_JSON}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases")
+
+          UPLOAD_URL=$(printf '%s' "${RESPONSE}" | python3 -c "import json, sys; print(json.load(sys.stdin)['upload_url'].split('{', 1)[0])")
+
+          for FILE in "${ARCHIVE_PATH}" "${CHECKSUM_PATH}"; do
+            NAME=$(basename "${FILE}")
+            curl --fail --silent --show-error \
+              -X POST \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"${FILE}" \
+              "${UPLOAD_URL}?name=${NAME}"
+          done
